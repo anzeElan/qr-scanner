@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QR scanner</title>
+<style>
+:root{--bg:#f3f5f2;--surface:#fff;--ink:#16211c;--muted:#5b6862;--accent:#0f6b4f;--accent-ink:#fff;--line:#d5dcd7;--frame:#3ddc97;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101613;--surface:#19211d;--ink:#e8efeb;--muted:#9aa8a1;--accent:#3ddc97;--accent-ink:#06130d;--line:#2b3731;--frame:#3ddc97}}
+:root[data-theme="dark"]{--bg:#101613;--surface:#19211d;--ink:#e8efeb;--muted:#9aa8a1;--accent:#3ddc97;--accent-ink:#06130d;--line:#2b3731;--frame:#3ddc97}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:480px;margin:0 auto;padding:20px 16px 32px}
+h1{font-size:1.5rem;margin:0 0 4px}
+p.sub{margin:0 0 16px;color:var(--muted)}
+.view{position:relative;aspect-ratio:1/1;background:#000;border-radius:14px;overflow:hidden}
+video{width:100%;height:100%;object-fit:cover;display:block}
+.frame{position:absolute;inset:18%;border:3px solid var(--frame);border-radius:12px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none}
+.idle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:#cfd8d3}
+.row{display:flex;gap:10px;margin:14px 0}
+button,label.btn{flex:1;min-height:48px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:inherit;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0 12px}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button:focus-visible,label.btn:focus-within,a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+input[type=file]{position:absolute;opacity:0;width:1px;height:1px}
+.msg{color:var(--muted);min-height:1.5em;margin:0 0 12px}
+.msg.err{color:#b3261e}
+@media (prefers-color-scheme:dark){.msg.err{color:#ff8a80}}
+.result{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px}
+.result h2{font-size:1rem;margin:0 0 6px}
+.result pre{margin:0 0 12px;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+.result .actions{display:flex;gap:10px}
+.result a.btn{flex:1;min-height:44px;border-radius:10px;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;text-decoration:none;font-weight:600}
+.hidden{display:none!important}
+ul{list-style:none;margin:20px 0 0;padding:0}
+li{border-top:1px solid var(--line);padding:10px 0;overflow-wrap:anywhere;font-size:.9rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>QR scanner</h1>
+  <p class="sub">Point your camera at a QR code. Nothing leaves your phone.</p>
+
+  <div class="view">
+    <video id="video" playsinline muted></video>
+    <div class="frame hidden" id="frame"></div>
+    <div class="idle" id="idle">Camera is off. Tap Start camera.</div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="toggle" type="button">Start camera</button>
+    <label class="btn">Scan from photo<input type="file" id="file" accept="image/*"></label>
+  </div>
+
+  <p class="msg" id="msg" role="status" aria-live="polite"></p>
+
+  <section class="result hidden" id="result" aria-live="polite">
+    <h2>Scanned</h2>
+    <pre id="text"></pre>
+    <div class="actions">
+      <a class="btn hidden" id="open" target="_blank" rel="noopener noreferrer">Open link</a>
+      <button type="button" id="copy">Copy</button>
+    </div>
+  </section>
+
+  <ul id="history"></ul>
+</main>
+<canvas id="canvas" class="hidden"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+(function(){
+  var video=document.getElementById('video'), canvas=document.getElementById('canvas'),
+      ctx=canvas.getContext('2d',{willReadFrequently:true}),
+      toggle=document.getElementById('toggle'), msg=document.getElementById('msg'),
+      idle=document.getElementById('idle'), frame=document.getElementById('frame'),
+      result=document.getElementById('result'), textEl=document.getElementById('text'),
+      openLink=document.getElementById('open'), copyBtn=document.getElementById('copy'),
+      fileIn=document.getElementById('file'), history=document.getElementById('history');
+  var stream=null, raf=null, last='';
+
+  function say(t,err){msg.textContent=t;msg.className='msg'+(err?' err':'');}
+
+  function show(data){
+    if(data===last) return;
+    last=data;
+    textEl.textContent=data;
+    var isUrl=/^https?:\/\//i.test(data);
+    openLink.classList.toggle('hidden',!isUrl);
+    if(isUrl) openLink.href=data;
+    result.classList.remove('hidden');
+    var li=document.createElement('li'); li.textContent=data;
+    history.insertBefore(li,history.firstChild);
+    while(history.children.length>10) history.removeChild(history.lastChild);
+    if(navigator.vibrate){try{navigator.vibrate(60);}catch(e){}}
+  }
+
+  function tick(){
+    if(!stream) return;
+    if(video.readyState===video.HAVE_ENOUGH_DATA){
+      var w=video.videoWidth, h=video.videoHeight, s=Math.min(1,640/Math.max(w,h));
+      canvas.width=Math.round(w*s); canvas.height=Math.round(h*s);
+      ctx.drawImage(video,0,0,canvas.width,canvas.height);
+      var img=ctx.getImageData(0,0,canvas.width,canvas.height);
+      var code=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});
+      if(code&&code.data) show(code.data);
+    }
+    raf=requestAnimationFrame(tick);
+  }
+
+  async function start(){
+    say('');
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+      say('This browser cannot open the camera here. Use Scan from photo instead.',true); return;
+    }
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+      video.srcObject=stream; await video.play();
+      idle.classList.add('hidden'); frame.classList.remove('hidden');
+      toggle.textContent='Stop camera'; last='';
+      say('Looking for a QR code…');
+      tick();
+    }catch(e){
+      stream=null;
+      var n=(e&&e.name)||'Error', hint;
+      if(n==='NotFoundError'||n==='OverconstrainedError') hint='No camera was found on this device.';
+      else if(n==='NotReadableError') hint='Another app is using the camera. Close Teams, Zoom or other tabs using it, then try again.';
+      else if(n==='NotAllowedError') hint='The browser, Windows, or the page frame is blocking the camera.';
+      else hint='The camera could not start.';
+      say(hint+' ('+n+') You can still use Scan from photo.',true);
+    }
+  }
+
+  function stop(){
+    if(raf) cancelAnimationFrame(raf);
+    if(stream){stream.getTracks().forEach(function(t){t.stop();});}
+    stream=null; video.srcObject=null;
+    idle.classList.remove('hidden'); frame.classList.add('hidden');
+    toggle.textContent='Start camera'; say('');
+  }
+
+  toggle.addEventListener('click',function(){stream?stop():start();});
+
+  fileIn.addEventListener('change',function(){
+    var f=fileIn.files&&fileIn.files[0]; if(!f) return;
+    var im=new Image(), rd=new FileReader();
+    im.onload=function(){
+      var s=Math.min(1,1200/Math.max(im.width,im.height));
+      canvas.width=Math.round(im.width*s); canvas.height=Math.round(im.height*s);
+      ctx.drawImage(im,0,0,canvas.width,canvas.height);
+      var d=ctx.getImageData(0,0,canvas.width,canvas.height);
+      var code=jsQR(d.data,d.width,d.height,{inversionAttempts:'attemptBoth'});
+      fileIn.value='';
+      if(code&&code.data){last='';show(code.data);say('');}
+      else say('No QR code found in that photo. Try a closer, sharper shot.',true);
+    };
+    im.onerror=function(){fileIn.value='';say('That file could not be read as an image. Use a PNG or JPG (HEIC photos may not work).',true);};
+    rd.onload=function(){im.src=rd.result;};
+    rd.onerror=function(){fileIn.value='';say('That file could not be read.',true);};
+    rd.readAsDataURL(f);
+  });
+
+  copyBtn.addEventListener('click',async function(){
+    try{await navigator.clipboard.writeText(textEl.textContent);say('Copied.');}
+    catch(e){say('Copy failed. Press and hold the text to copy it.',true);}
+  });
+
+  window.addEventListener('pagehide',stop);
+})();
+</script>
+</body>
+</html>
